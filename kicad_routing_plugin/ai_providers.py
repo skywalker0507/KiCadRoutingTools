@@ -144,6 +144,23 @@ def _claude_tool_result(block: Dict[str, Any]) -> str:
     return _compact(first[0] if first else "(no output)", 120)
 
 
+def _text_from_content(value: Any) -> str:
+    """Extract user-visible text from common provider message shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or "")
+    return str(value or "")
+
+
 class ClaudeProvider(AIProvider):
     provider_id = "claude"
     display_name = "Claude Code"
@@ -314,7 +331,6 @@ class CodexProvider(AIProvider):
             "--json",
             "--sandbox",
             "read-only",
-            "--search",
         ]
         if model:
             command += ["--model", model]
@@ -358,15 +374,13 @@ class CodexProvider(AIProvider):
         started = event_type == "item.started"
 
         if item_type in ("agent_message", "message"):
-            text = item.get("text") or item.get("content") or ""
-            if isinstance(text, list):
-                text = "\n".join(
-                    part.get("text", "") if isinstance(part, dict) else str(part)
-                    for part in text
-                )
-            text = str(text).strip()
+            text = _text_from_content(item.get("text") or item.get("content")).strip()
             if completed and text:
-                state.final_text = text
+                # Newer Codex streams may distinguish progress commentary from
+                # the final answer. Keep showing commentary, but don't let it
+                # satisfy the final-result contract.
+                if item.get("phase") != "commentary":
+                    state.final_text = text
                 return text + "\n"
             return None
 

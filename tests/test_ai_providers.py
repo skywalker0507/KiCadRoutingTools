@@ -1,6 +1,7 @@
 """Unit tests for the provider layer; does not require wxPython or KiCad."""
 
 import unittest
+from unittest.mock import patch
 
 from kicad_routing_plugin.ai_providers import (
     KNOWN_SKILLS,
@@ -8,7 +9,9 @@ from kicad_routing_plugin.ai_providers import (
     ClaudeProvider,
     CodexProvider,
     ProviderStreamState,
+    choose_initial_provider,
     create_provider,
+    set_active_provider,
 )
 
 
@@ -24,6 +27,20 @@ class ProviderRegistryTests(unittest.TestCase):
 
     def test_plane_mapping_skill_is_known_to_prompt_converter(self):
         self.assertIn("recommend-plane-mappings", KNOWN_SKILLS)
+
+    def test_provider_selection_falls_back_to_installed_codex(self):
+        set_active_provider("claude")
+        with patch.object(ClaudeProvider, "find_executable", return_value=None), patch.object(
+            CodexProvider, "find_executable", return_value="/tools/codex"
+        ):
+            self.assertEqual(choose_initial_provider("claude"), "codex")
+
+    def test_provider_selection_keeps_available_preference(self):
+        set_active_provider("claude")
+        with patch.object(ClaudeProvider, "find_executable", return_value="/tools/claude"), patch.object(
+            CodexProvider, "find_executable", return_value="/tools/codex"
+        ):
+            self.assertEqual(choose_initial_provider("codex"), "codex")
 
 
 class ClaudeProviderTests(unittest.TestCase):
@@ -68,7 +85,7 @@ class CodexProviderTests(unittest.TestCase):
         )
         self.assertEqual(command[:3], ["/tools/codex", "exec", "--json"])
         self.assertIn("read-only", command)
-        self.assertIn("--search", command)
+        self.assertNotIn("--search", command)
         self.assertIn("gpt-test", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("$plan-pcb-routing", command[-1])
@@ -105,6 +122,38 @@ class CodexProviderTests(unittest.TestCase):
         self.assertEqual(state.final_text, "analysis\nRESULT=PASS")
         result, error = provider.finish(state, "", 0)
         self.assertEqual(result, "analysis\nRESULT=PASS")
+        self.assertIsNone(error)
+
+    def test_commentary_agent_message_does_not_become_final_text(self):
+        provider = CodexProvider(executable="codex")
+        state = ProviderStreamState()
+        transcript = provider.format_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "phase": "commentary",
+                    "text": "working on it",
+                },
+            },
+            state,
+        )
+        self.assertEqual(transcript, "working on it\n")
+        self.assertIsNone(state.final_text)
+
+        provider.format_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "phase": "final_answer",
+                    "content": [{"type": "text", "text": "done\nRESULT=PASS"}],
+                },
+            },
+            state,
+        )
+        result, error = provider.finish(state, "", 0)
+        self.assertEqual(result, "done\nRESULT=PASS")
         self.assertIsNone(error)
 
     def test_reasoning_content_is_not_exposed(self):

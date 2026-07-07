@@ -81,7 +81,7 @@ Never assume a request to “analyze” or “plan” authorizes board modificat
 - `kicad_routing_plugin/ai_providers.py` owns executable discovery, command construction, model/effort choices, skill syntax, JSONL event parsing, final-result extraction, and authentication guidance.
 - The plugin currently supports `ClaudeProvider` and `CodexProvider` behind one provider-neutral runner.
 - Plugin-driven provider runs are read-only; they analyze a temporary board snapshot and return a report or plan. The plugin's local routing engines make actual PCB changes only after user review.
-- Codex plugin runs use `codex exec --json --sandbox read-only --search` and the user's existing Codex CLI authentication/configuration.
+- Codex plugin runs use `codex exec --json --sandbox read-only` and the user's existing Codex CLI authentication/configuration.
 - Keep compatibility imports and saved settings working when renaming legacy Claude-specific classes or files.
 - Provider tests must not import wxPython; keep provider parsing and command construction in the pure-Python provider module.
 - Do not display raw reasoning/chain-of-thought from provider event streams. Show only safe activity summaries and final messages.

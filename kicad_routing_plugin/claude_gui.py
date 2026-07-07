@@ -169,6 +169,7 @@ class AIProviderRunner:
             self._process = subprocess.Popen(
                 command,
                 cwd=ROOT_DIR,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -626,8 +627,17 @@ class ClaudeTab(wx.Panel):
         provider_ids = [provider_id for _label, provider_id in PROVIDER_CHOICES]
         if value not in provider_ids:
             value = choose_initial_provider("claude")
-        old_model = self.get_model_value() if hasattr(self, "model_choice") else None
-        old_effort = self.get_effort_value() if hasattr(self, "effort_choice") else None
+        same_provider = getattr(self, "_provider_id", None) == value
+        old_model = (
+            self.get_model_value()
+            if same_provider and hasattr(self, "model_choice")
+            else None
+        )
+        old_effort = (
+            self.get_effort_value()
+            if same_provider and hasattr(self, "effort_choice")
+            else None
+        )
         self._provider_id = value
         set_active_provider(value)
         self._provider = create_provider(value)

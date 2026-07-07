@@ -106,7 +106,6 @@ Codex uses non-interactive JSONL execution:
 ```bash
 codex exec --json \
   --sandbox read-only \
-  --search \
   [--model <model>] \
   [--config 'model_reasoning_effort="high"'] \
   <prompt>
