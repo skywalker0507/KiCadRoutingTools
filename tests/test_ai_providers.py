@@ -182,6 +182,45 @@ class CodexProviderTests(unittest.TestCase):
         self.assertEqual(error, "authentication required")
         self.assertIn("codex login", provider.auth_error_hint(error))
 
+    def test_non_terminal_item_error_is_a_warning(self):
+        provider = CodexProvider(executable="codex")
+        state = ProviderStreamState()
+        transcript = provider.format_event(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "error",
+                    "message": "Model metadata missing; using fallback metadata",
+                },
+            },
+            state,
+        )
+        self.assertEqual(
+            transcript,
+            "[warning] Model metadata missing; using fallback metadata\n",
+        )
+        self.assertIsNone(state.error)
+
+    def test_duplicate_terminal_errors_are_shown_once(self):
+        provider = CodexProvider(executable="codex")
+        state = ProviderStreamState()
+        first = provider.format_event(
+            {"type": "error", "message": "Codex request failed"}, state
+        )
+        second = provider.format_event(
+            {"type": "turn.failed", "error": {"message": "Codex request failed"}},
+            state,
+        )
+        self.assertEqual(first, "[error] Codex request failed\n")
+        self.assertIsNone(second)
+
+    def test_upgrade_hint_handles_model_cli_version_mismatch(self):
+        provider = CodexProvider(executable="codex")
+        hint = provider.auth_error_hint(
+            "The 'example-model' model requires a newer version of Codex."
+        )
+        self.assertIn("Update the Codex app or CLI", hint)
+
 
 if __name__ == "__main__":
     unittest.main()

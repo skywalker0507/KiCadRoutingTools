@@ -353,8 +353,11 @@ class CodexProvider(AIProvider):
             error = event.get("message") or event.get("error") or event.get("detail")
             if isinstance(error, dict):
                 error = error.get("message") or json.dumps(error, ensure_ascii=False)
-            state.error = str(error or "unknown error from Codex")
-            return f"[error] {state.error}\n"
+            message = str(error or "unknown error from Codex")
+            if state.error == message:
+                return None
+            state.error = message
+            return f"[error] {message}\n"
 
         if event_type == "turn.completed":
             usage = event.get("usage") or event.get("token_usage")
@@ -372,6 +375,15 @@ class CodexProvider(AIProvider):
         item_type = item.get("type", "")
         completed = event_type == "item.completed"
         started = event_type == "item.started"
+
+        if item_type == "error" and completed:
+            # Codex can emit non-terminal diagnostics as ``item.error`` before
+            # continuing with a fallback. Terminal failures arrive as top-level
+            # ``error`` / ``turn.failed`` events and set ``state.error``.
+            message = item.get("message") or item.get("error") or "unknown diagnostic"
+            if isinstance(message, dict):
+                message = message.get("message") or json.dumps(message, ensure_ascii=False)
+            return f"[warning] {message}\n"
 
         if item_type in ("agent_message", "message"):
             text = _text_from_content(item.get("text") or item.get("content")).strip()
@@ -421,7 +433,13 @@ class CodexProvider(AIProvider):
 
     def auth_error_hint(self, error: Optional[str]) -> str:
         markers = ("not logged in", "login", "unauthorized", "401", "authentication")
-        if error and any(marker in error.lower() for marker in markers):
+        lowered = error.lower() if error else ""
+        if "requires a newer version of codex" in lowered:
+            return (
+                "\nThis model requires a newer Codex CLI. Update the Codex app or CLI, "
+                "restart KiCad, then retry."
+            )
+        if error and any(marker in lowered for marker in markers):
             return (
                 "\nOpenAI Codex is installed but not authenticated: open a terminal, "
                 "run `codex login`, then retry."

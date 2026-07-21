@@ -30,6 +30,10 @@ Confirm that the CLI is visible to desktop applications:
 codex --version
 ```
 
+Keep the CLI current enough for the model selected in your Codex configuration.
+If the plugin reports that a model requires a newer Codex version, update the
+Codex app or CLI, restart KiCad, and retry.
+
 KiCad launched from a desktop icon may not inherit the shell PATH. The plugin therefore also checks common locations such as:
 
 ```text
