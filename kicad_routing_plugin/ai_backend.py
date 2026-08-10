@@ -244,6 +244,79 @@ class ClaudeBackend(AIBackend):
         return _ClaudeStreamState()
 
 
+# ---------------------------------------------------------------------- Codex
+
+
+class CodexBackend(ClaudeBackend):
+    """OpenAI Codex CLI backend using the repository's read-only workflow."""
+
+    id = "codex"
+    label = "OpenAI Codex"
+    cli_name = "codex"
+    install_url = "https://github.com/openai/codex"
+    login_hint = ("OpenAI Codex is installed but not authenticated: open a "
+                  "terminal, run `codex login`, then retry.")
+    candidates = (
+        os.path.expanduser("~/.local/bin/codex"),
+        os.path.expanduser("~/AppData/Roaming/npm/codex.cmd"),
+        "/opt/homebrew/bin/codex", "/usr/local/bin/codex", "/usr/bin/codex",
+    )
+    model_suggestions = ("Default", "gpt-5.2-codex", "gpt-5.1-codex")
+    effort_suggestions = ("Default", "low", "medium", "high", "xhigh")
+    _auth_markers = ("login", "auth", "credential", "unauthorized", "api key")
+
+    def skill_prompt(self, skill, args, instructions):
+        return f"${skill} {args} — {instructions}"
+
+    def build_cmd(self, cli_path, prompt, model=None, effort=None):
+        cmd = [cli_path, "exec", "--json", "--sandbox", "read-only"]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--config", f"model_reasoning_effort={effort}"]
+        cmd += [prompt]
+        return cmd
+
+    def stream_state(self):
+        return _CodexStreamState()
+
+
+class _CodexStreamState(_StreamState):
+    """Parse Codex CLI JSONL while keeping only safe user-visible summaries."""
+
+    def __init__(self):
+        self._texts = []
+        self._errors = []
+
+    def feed(self, event):
+        typ = event.get("type", "")
+        if typ in ("thread.started", "turn.started"):
+            return None
+        if typ in ("turn.completed", "response.completed"):
+            return None
+        if typ in ("error", "turn.failed"):
+            err = event.get("error") or event.get("message") or event.get("reason")
+            self._errors.append(str(err or "Codex run failed"))
+            return None
+        item = event.get("item") or event.get("output") or {}
+        if isinstance(item, dict):
+            text = item.get("text") or item.get("content")
+            if isinstance(text, list):
+                text = "\n".join(str(x.get("text", x)) if isinstance(x, dict) else str(x) for x in text)
+            if text:
+                text = str(text)
+                self._texts.append(text)
+                return text.rstrip() + "\n"
+        return None
+
+    def finish(self, returncode, stderr):
+        if self._errors:
+            return None, "; ".join(self._errors)
+        if not self._texts:
+            return None, (stderr or "").strip() or f"codex exited with code {returncode}"
+        return "\n".join(self._texts), None
+
+
 # ------------------------------------------------------------------- opencode
 
 
@@ -350,8 +423,8 @@ class OpencodeBackend(AIBackend):
 
 # ------------------------------------------------------------------ registry
 
-BACKENDS = {b.id: b for b in (ClaudeBackend(), OpencodeBackend())}
-BACKEND_IDS = tuple(BACKENDS)          # ("claude", "opencode")
+BACKENDS = {b.id: b for b in (ClaudeBackend(), CodexBackend(), OpencodeBackend())}
+BACKEND_IDS = tuple(BACKENDS)          # ("claude", "codex", "opencode")
 DEFAULT_BACKEND_ID = "claude"
 
 

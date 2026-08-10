@@ -1,12 +1,12 @@
 """
-KiCad Routing Tools - AI (Claude Code / opencode) integration
+KiCad Routing Tools - AI (Claude Code / Codex / opencode) integration
 
 Runs an agent CLI headless to drive the project's AI skills from the GUI
 (GitHub issues #40, #34, #39; configurable backend: #503).
 
 Building blocks:
 - ai_backend.AIBackend: which CLI, its argv, and its stream-event format
-  (Claude Code by default; opencode as the configurable alternative)
+  (Claude Code by default; Codex and opencode as configurable alternatives)
 - AISkillRunner: spawn the CLI, stream events to main-thread callbacks
 - AISkillDialog: modal dialog that runs one skill with a live transcript
   and returns the machine-readable RESULT=<value> last line
@@ -375,9 +375,8 @@ class AITab(wx.Panel):
         self.backend_choice.SetSelection(BACKEND_IDS.index(DEFAULT_BACKEND_ID))
         self.backend_choice.SetToolTip(
             "Agent CLI used for all AI features (this tab and the other tabs' "
-            "'Ask AI' buttons). Claude Code runs Anthropic models; opencode "
-            "(https://opencode.ai) supports many model providers. Both use the "
-            "same skills (.claude/skills/) and need their CLI installed and "
+            "'Ask AI' buttons). Claude Code, Codex, and opencode share the "
+            "routing workflows; install and authenticate the selected CLI and "
             "logged in.")
         self.backend_choice.Bind(wx.EVT_CHOICE, self._on_backend_change)
         sel_grid.Add(self.backend_choice, 0, wx.EXPAND)

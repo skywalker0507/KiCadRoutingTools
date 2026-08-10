@@ -37,7 +37,7 @@ def check(name, cond, detail=""):
 
 # ------------------------------------------------------------------ registry
 
-check("registry ids", BACKEND_IDS == ("claude", "opencode"))
+check("registry ids", BACKEND_IDS == ("claude", "codex", "opencode"))
 check("default backend", DEFAULT_BACKEND_ID == "claude")
 check("get_backend known", get_backend("opencode").id == "opencode")
 check("get_backend unknown falls back", get_backend("gpt-cli").id == "claude")
@@ -45,6 +45,14 @@ check("get_backend None falls back", get_backend(None).id == "claude")
 
 claude = BACKENDS["claude"]
 oc = BACKENDS["opencode"]
+codex = BACKENDS["codex"]
+
+cmd = codex.build_cmd("codex", "PROMPT", model="gpt-5.2-codex", effort="high")
+check("codex argv is read-only JSONL",
+      cmd[:5] == ["codex", "exec", "--json", "--sandbox", "read-only"]
+      and "--model" in cmd and "model_reasoning_effort=high" in cmd)
+p = codex.skill_prompt("review-routed-board", "/tmp/b.kicad_pcb", "analysis only")
+check("codex skill prompt uses native syntax", p.startswith("$review-routed-board"))
 
 # ---------------------------------------------------------------------- argv
 

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Stress Test Router"
+  short_description: "Run explicit real-world router regression tests"
+  default_prompt: "Run $stress-test-router in single-board or small-batch mode with a corpus outside the repository."
+policy:
+  allow_implicit_invocation: false
