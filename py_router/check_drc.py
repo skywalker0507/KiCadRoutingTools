@@ -734,6 +734,29 @@ def _pad_has_no_copper(pad: Pad) -> bool:
     return not any(l == '*.Cu' or l.endswith('.Cu') for l in pad.layers)
 
 
+def pad_to_pad_distance(pad1: Pad, pad2: Pad
+                        ) -> Tuple[float, Optional[Tuple[float, float]]]:
+    """Return the minimum copper-edge distance between two pads.
+
+    This is the public, parser-semantic-aware pad geometry primitive for
+    non-DRC consumers.  It handles custom polygons, round/oval/roundrect pads
+    and ``rect_rotation`` exactly like the authoritative DRC path.
+    """
+    best = float('inf')
+    best_pt = None
+    for px, py in _pad_perimeter_points(pad1):
+        d = point_to_pad_distance(px, py, pad2)
+        if d < best:
+            best = d
+            best_pt = (px, py)
+    for px, py in _pad_perimeter_points(pad2):
+        d = point_to_pad_distance(px, py, pad1)
+        if d < best:
+            best = d
+            best_pt = (px, py)
+    return best, best_pt
+
+
 def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
                           routing_layers: List[str],
                           clearance_margin: float = 0.05
@@ -755,18 +778,7 @@ def check_pad_pad_overlap(pad1: Pad, pad2: Pad, clearance: float,
     if not shared:
         return False, 0.0, None
 
-    best = float('inf')
-    best_pt = None
-    for px, py in _pad_perimeter_points(pad1):
-        d = point_to_pad_distance(px, py, pad2)
-        if d < best:
-            best = d
-            best_pt = (px, py)
-    for px, py in _pad_perimeter_points(pad2):
-        d = point_to_pad_distance(px, py, pad1)
-        if d < best:
-            best = d
-            best_pt = (px, py)
+    best, best_pt = pad_to_pad_distance(pad1, pad2)
 
     overlap = clearance - best
     if overlap > clearance * clearance_margin:

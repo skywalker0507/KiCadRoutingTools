@@ -2,7 +2,20 @@
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
 from typing import Tuple
+
+# Reuse the router's authoritative KiCad pad/drill geometry.  In particular,
+# Pad.size_x/size_y are already resolved into board space and only
+# Pad.rect_rotation remains; applying Pad.rotation again is incorrect.
+_ENGINE = Path(__file__).resolve().parents[2] / "py_router"
+if str(_ENGINE) not in sys.path:
+    sys.path.insert(0, str(_ENGINE))
+
+from check_drc import pad_to_pad_distance as _pad_to_pad_distance  # noqa: E402
+from check_drc import point_to_pad_distance  # noqa: E402
+from kicad_parser import pad_drill_circles  # noqa: E402
 
 Point = Tuple[float, float]
 
@@ -59,59 +72,25 @@ def segment_to_segment_distance(a: Point, b: Point, c: Point, d: Point) -> float
     )
 
 
-def rotate_into_pad_frame(x: float, y: float, cx: float, cy: float, angle_deg: float) -> Point:
-    """Return point coordinates relative to a pad's local axes.
-
-    We only need a self-consistent geometric frame here; using -angle rotates a
-    board point back into the pad frame for the parser's absolute pad angle.
-    """
-    rad = math.radians(-angle_deg)
-    dx, dy = x - cx, y - cy
-    return (dx * math.cos(rad) - dy * math.sin(rad), dx * math.sin(rad) + dy * math.cos(rad))
-
-
 def point_inside_pad(x: float, y: float, pad) -> bool:
-    """Conservative containment test for ordinary KiCad pad shapes."""
-    px, py = rotate_into_pad_frame(x, y, pad.global_x, pad.global_y, getattr(pad, "rotation", 0.0) or 0.0)
-    sx, sy = float(pad.size_x), float(pad.size_y)
-    shape = (getattr(pad, "shape", "") or "").lower()
-    eps = 1e-9
-    if shape in ("circle",):
-        return px * px + py * py <= (min(sx, sy) / 2.0 + eps) ** 2
-    if shape in ("oval",):
-        # Capsule along the major axis.
-        if sx >= sy:
-            half_line = max(0.0, (sx - sy) / 2.0)
-            nearest_x = max(-half_line, min(half_line, px))
-            return math.hypot(px - nearest_x, py) <= sy / 2.0 + eps
-        half_line = max(0.0, (sy - sx) / 2.0)
-        nearest_y = max(-half_line, min(half_line, py))
-        return math.hypot(px, py - nearest_y) <= sx / 2.0 + eps
-    # rect, roundrect, trapezoid, custom fallback: bounding rectangle. Custom
-    # pads remain conservative and are explicitly reported as a limitation.
-    return abs(px) <= sx / 2.0 + eps and abs(py) <= sy / 2.0 + eps
+    """True when a board-space point is inside authoritative pad copper."""
+    return point_to_pad_distance(x, y, pad) <= 1e-9
 
 
 def pad_edge_distance(a, b) -> float:
-    """Capsule-style pad edge distance used by the public JLC helper.
+    """Minimum copper-edge distance using KiCad parser semantics."""
+    distance, _ = _pad_to_pad_distance(a, b)
+    return distance
 
-    Radius is the short axis / 2 and the centerline extends along the long axis.
-    This intentionally avoids treating a suspicious/overlong pad bounding box as
-    fully solid copper while remaining deterministic for rotated oval/rect pads.
+
+def drill_to_pad_edge_distance(drilled_pad, smd_pad) -> float:
+    """Minimum edge distance from a round/slot component drill to pad copper.
+
+    Negative values mean the physical drill area intersects the SMD pad.  Slot
+    drills are sampled as the same capsule-circle union used by the router.
     """
-    def capsule(pad):
-        sx, sy = float(pad.size_x), float(pad.size_y)
-        radius = min(sx, sy) / 2.0
-        half_len = max(0.0, (max(sx, sy) - min(sx, sy)) / 2.0)
-        angle = math.radians(getattr(pad, "rotation", 0.0) or 0.0)
-        if sx >= sy:
-            ux, uy = math.cos(angle), math.sin(angle)
-        else:
-            ux, uy = -math.sin(angle), math.cos(angle)
-        cx, cy = float(pad.global_x), float(pad.global_y)
-        return ((cx - ux * half_len, cy - uy * half_len),
-                (cx + ux * half_len, cy + uy * half_len), radius)
-
-    a1, a2, ar = capsule(a)
-    b1, b2, br = capsule(b)
-    return segment_to_segment_distance(a1, a2, b1, b2) - ar - br
+    circles = pad_drill_circles(drilled_pad)
+    if not circles:
+        return float("inf")
+    return min(point_to_pad_distance(x, y, smd_pad) - diameter / 2.0
+               for x, y, diameter in circles)

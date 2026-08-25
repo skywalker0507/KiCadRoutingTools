@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
@@ -32,10 +34,13 @@ class Finding:
 class DfmReport:
     source: str
     profile: Dict[str, Any]
+    inputs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    tool: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
     findings: List[Finding] = field(default_factory=list)
     coverage: List[str] = field(default_factory=list)
     limitations: List[str] = field(default_factory=list)
-    schema_version: str = "1"
+    schema_version: str = "2"
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -49,22 +54,57 @@ class DfmReport:
         return tuple(f for f in self.findings if f.severity == "warning")
 
     @property
+    def infos(self) -> Sequence[Finding]:
+        return tuple(f for f in self.findings if f.severity == "info")
+
+    @property
+    def status(self) -> str:
+        if self.errors:
+            return "fail"
+        if self.warnings:
+            return "review_required"
+        return "pass"
+
+    @property
     def passed(self) -> bool:
-        return not self.errors
+        return self.status == "pass"
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        finding_dicts = [f.to_dict() for f in self.findings]
+        by_rule: Dict[str, int] = {}
+        for finding in self.findings:
+            by_rule[finding.rule] = by_rule.get(finding.rule, 0) + 1
+        stable = {
             "schema_version": self.schema_version,
-            "generated_at": self.generated_at,
             "source": self.source,
+            "inputs": self.inputs,
+            "tool": self.tool,
             "profile": self.profile,
+            "metrics": self.metrics,
+            "coverage": self.coverage,
+            "limitations": self.limitations,
+            "findings": finding_dicts,
+        }
+        fingerprint_stable = dict(stable)
+        fingerprint_stable.pop("source", None)
+        fingerprint_stable["inputs"] = {
+            name: {k: v for k, v in evidence.items() if k != "path"}
+            for name, evidence in self.inputs.items()
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            fingerprint_stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest().upper()
+        return {
+            **stable,
+            "generated_at": self.generated_at,
+            "evidence_fingerprint_sha256": fingerprint,
             "summary": {
+                "status": self.status,
                 "passed": self.passed,
                 "errors": len(self.errors),
                 "warnings": len(self.warnings),
+                "info": len(self.infos),
                 "findings": len(self.findings),
+                "by_rule": dict(sorted(by_rule.items())),
             },
-            "coverage": self.coverage,
-            "limitations": self.limitations,
-            "findings": [f.to_dict() for f in self.findings],
         }

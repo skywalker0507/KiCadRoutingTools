@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import math
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from .geometry import pad_edge_distance, point_inside_pad, segment_to_segment_distance
+from .geometry import (
+    drill_to_pad_edge_distance,
+    pad_edge_distance,
+    point_to_pad_distance,
+    segment_to_segment_distance,
+)
 from .model import DfmReport, Finding
 from .standards import JlcFr4Profile, make_jlc_fr4_profile
 
@@ -18,17 +25,18 @@ COVERAGE = [
     "through-via drill and outer diameter",
     "PTH annular-ring margin",
     "plated/non-plated slot dimensions represented as pad drills",
-    "same-net pad-to-pad solder-mask/bridging preflight",
-    "via-in-SMD-pad detection and fill/cap metadata warning",
-    "component-drill-inside-SMD-pad manufacturing-semantics warning",
+    "same-net pad-to-pad copper proximity preflight with composite-pad deduplication",
+    "via-drill intersection with paste-bearing SMD pads and fill/cap metadata warning",
+    "round/slot component-drill intersection with SMD pads",
     "BOM/CPL designator consistency (when both CSV files are supplied)",
 ]
 
 LIMITATIONS = [
     "Does not replace KiCad DRC or official JLCPCB/JLCDFM CAM review.",
     "Does not have JLC's proprietary component-body/pin 3D models; online SMT collision, pin-pad overlap and plug-in-hole model checks remain official-gate items.",
+    "BOM/CPL consistency compares their designator sets; without a reviewed assembly manifest it cannot prove that both files did not omit the same intended component.",
     "Zones, solder-mask bridges, silkscreen clipping and Gerber/CAM interpretation are not fully modeled in this first local preflight.",
-    "Custom pad spacing uses conservative bounding geometry unless the existing parser exposes an ordinary shape.",
+    "Pad spacing reuses KiCadRoutingTools DRC geometry, including rect_rotation and custom polygons; it is still copper proximity, not actual solder-mask aperture analysis.",
     "Footprint drill holes used as thermal-via substitutes remain component drills; the checker warns on this geometry but cannot force CAM to treat them as IPC-4761 filled/capped vias.",
 ]
 
@@ -74,6 +82,35 @@ def _all_pads(pcb) -> List[object]:
     return out
 
 
+def _file_evidence(path: str) -> Dict[str, object]:
+    p = Path(path).resolve()
+    digest = hashlib.sha256(p.read_bytes()).hexdigest().upper()
+    return {"path": str(p), "sha256": digest, "bytes": p.stat().st_size}
+
+
+def _paste_bearing(pad) -> bool:
+    return any(layer in ("F.Paste", "B.Paste", "*.Paste")
+               for layer in (getattr(pad, "layers", None) or []))
+
+
+def _same_logical_pad(a, b) -> bool:
+    return (_obj_pad(a) == _obj_pad(b))
+
+
+def _same_physical_pad(a, b) -> bool:
+    """True for duplicate logical contacts drawn on identical copper."""
+    attrs = ("global_x", "global_y", "size_x", "size_y", "rect_rotation")
+    if any(abs(float(getattr(a, key, 0.0) or 0.0) -
+               float(getattr(b, key, 0.0) or 0.0)) > 1e-9 for key in attrs):
+        return False
+    return ((getattr(a, "shape", "") or "").lower() ==
+            (getattr(b, "shape", "") or "").lower() and
+            set(getattr(a, "layers", None) or []) == set(getattr(b, "layers", None) or []) and
+            float(getattr(a, "roundrect_rratio", 0.0) or 0.0) ==
+            float(getattr(b, "roundrect_rratio", 0.0) or 0.0) and
+            (getattr(a, "polygons", None) or []) == (getattr(b, "polygons", None) or []))
+
+
 def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
               outer_copper_oz: float = 1.0) -> DfmReport:
     layers = _layer_count(pcb)
@@ -84,6 +121,8 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
         coverage=list(COVERAGE),
         limitations=list(LIMITATIONS),
     )
+    if source and Path(source).is_file():
+        report.inputs["pcb"] = _file_evidence(source)
     f = report.findings
 
     size = _board_size(pcb)
@@ -99,6 +138,8 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
     # Trace width and same-layer different-net spacing. Pairwise checking is
     # intentionally bounded to route segments; KiCad DRC remains authoritative.
     segments = list(getattr(pcb, "segments", None) or [])
+    report.metrics["copper_layers"] = layers
+    report.metrics["segments_checked"] = len(segments)
     for seg in segments:
         if getattr(seg, "graphic", False):
             continue
@@ -152,6 +193,7 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
             ))
 
     vias = list(getattr(pcb, "vias", None) or [])
+    report.metrics["vias_checked"] = len(vias)
     for via in vias:
         drill, size_v = float(via.drill), float(via.size)
         name = getattr(via, "uuid", "") or f"via@{via.x:.3f},{via.y:.3f}"
@@ -163,6 +205,7 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
             f.append(Finding("via_outer_diameter", "error", f"Via outer diameter {size_v:.4f} mm is below profile minimum.", size_v, profile.min_via_outer_diameter, objects=(name,), location=(via.x, via.y)))
 
     pads = _all_pads(pcb)
+    report.metrics["pads_checked"] = len(pads)
     # PTH rings and slots.
     for pad in pads:
         ptype = (getattr(pad, "pad_type", "") or "").lower()
@@ -224,10 +267,22 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
         # Skip NPTH mechanical-only pads in copper spacing.
         if (getattr(a, "pad_type", "") == "np_thru_hole" or getattr(b, "pad_type", "") == "np_thru_hole"):
             continue
+        if _same_logical_pad(a, b):
+            # Composite pads (thermal-pad copper plus drill/paste primitives)
+            # are one logical land, not a pad-spacing violation family.
+            continue
+        same_net = getattr(a, "net_id", None) == getattr(b, "net_id", None) and getattr(a, "net_id", None) not in (None, 0)
+        if same_net and _same_physical_pad(a, b):
+            f.append(Finding(
+                "stacked_same_net_pads", "info",
+                f"Same-net pads {_obj_pad(a)} and {_obj_pad(b)} intentionally share identical copper geometry.",
+                objects=(_obj_pad(a), _obj_pad(b)),
+                location=(float(a.global_x), float(a.global_y)),
+            ))
+            continue
         gap = pad_edge_distance(a, b)
         if gap + 1e-9 >= profile.min_pad_to_track_spacing:
             continue
-        same_net = getattr(a, "net_id", None) == getattr(b, "net_id", None) and getattr(a, "net_id", None) not in (None, 0)
         # The upstream EasyEDA helper exposes this as an independent SAME-NET
         # solder-mask/bridging preflight. Different-net copper clearance belongs
         # to KiCad DRC and is intentionally not duplicated here.
@@ -240,48 +295,64 @@ def check_pcb(pcb, *, source: str = "", profile: Optional[JlcFr4Profile] = None,
             location=((a.global_x+b.global_x)/2.0, (a.global_y+b.global_y)/2.0),
         ))
 
-    # Component-drill-in-SMD-pad: catches the important case where thermal
-    # "vias" are encoded as footprint drill pads. Those land in Excellon as
-    # component drills, not ViaDrill objects, so CAM fill/cap intent must be
-    # confirmed explicitly. Same-footprint scope avoids connector/nearby-part noise.
+    # Component drills are Excellon ComponentDrill objects, not vias.  Compare
+    # their real round/slot capsule against every SMD copper pad on a shared
+    # outer side; centre-only containment misses slot-edge intersections.
     drilled_pads = [p for p in pads if (float(getattr(p, "drill", 0.0) or 0.0) > 0
                                          or float(getattr(p, "drill_w", 0.0) or 0.0) > 0
                                          or float(getattr(p, "drill_h", 0.0) or 0.0) > 0)]
     smd_pads = [p for p in pads if (getattr(p, "pad_type", "") or "").lower() == "smd"]
     for drilled in drilled_pads:
+        hits = []
         for smd in smd_pads:
-            if getattr(drilled, "component_ref", None) != getattr(smd, "component_ref", None):
+            if not _same_copper_side(drilled, smd):
                 continue
+            gap = drill_to_pad_edge_distance(drilled, smd)
+            if gap <= 1e-9:
+                hits.append((smd, gap))
+        if hits:
             hx = drilled.global_x if getattr(drilled, "hole_x", None) is None else drilled.hole_x
             hy = drilled.global_y if getattr(drilled, "hole_y", None) is None else drilled.hole_y
-            if point_inside_pad(hx, hy, smd):
-                f.append(Finding(
-                    "component_drill_in_smd_pad", "warning",
-                    f"Component drill {_obj_pad(drilled)} lies inside SMD pad {_obj_pad(smd)}. If this is a thermal via-in-pad structure, confirm the Excellon/CAM classification and filled+capped process explicitly.",
-                    objects=(_obj_pad(drilled), _obj_pad(smd)), location=(hx, hy),
-                    details={"drill_pad_type": getattr(drilled, "pad_type", "")},
-                ))
-                break
+            logical = [p for p, _ in hits if _same_logical_pad(drilled, p)]
+            rule = "component_drill_in_smd_pad" if logical else "component_drill_intersects_smd_pad"
+            names = sorted({_obj_pad(p) for p, _ in hits})
+            f.append(Finding(
+                rule, "warning",
+                f"Component drill {_obj_pad(drilled)} intersects SMD pad copper ({', '.join(names)}). Confirm the Excellon/CAM classification and anti-wicking process explicitly.",
+                measured=min(gap for _, gap in hits), required=0.0,
+                objects=(_obj_pad(drilled), *names), location=(hx, hy),
+                details={
+                    "drill_pad_type": getattr(drilled, "pad_type", ""),
+                    "same_logical_pad": bool(logical),
+                    "paste_bearing_hits": sorted({_obj_pad(p) for p, _ in hits if _paste_bearing(p)}),
+                },
+            ))
 
     # Via-in-pad detection. This does not mark it as invalid; it creates a
     # manufacturing-process warning unless KiCad preserved both fill and cap metadata.
+    paste_smd_pads = [p for p in smd_pads if _paste_bearing(p)]
+    report.metrics["paste_bearing_smd_pads_checked"] = len(paste_smd_pads)
     for via in vias:
-        for pad in smd_pads:
+        hits = []
+        for pad in paste_smd_pads:
             if not _same_copper_side(pad, type("ViaLayers", (), {"layers": via.layers})()):
                 continue
-            if not point_inside_pad(via.x, via.y, pad):
-                continue
-            attrs = getattr(via, "tenting_attrs", None) or {}
-            keys = {str(k).lower() for k in attrs}
-            filled_capped = "filling" in keys and "capping" in keys
-            if not filled_capped:
-                f.append(Finding(
-                    "via_in_pad_process", "warning",
-                    f"Via lies inside SMD pad {_obj_pad(pad)}. Confirm filled/capped via-in-pad process to avoid solder wicking; KiCad via metadata does not show both filling and capping.",
-                    objects=(getattr(via, "uuid", "") or f"via@{via.x:.3f},{via.y:.3f}", _obj_pad(pad)),
-                    location=(via.x, via.y), details={"via_protection_tokens": sorted(keys)},
-                ))
-            break
+            drill_gap = point_to_pad_distance(via.x, via.y, pad) - float(via.drill) / 2.0
+            if drill_gap <= 1e-9:
+                hits.append((pad, drill_gap))
+        attrs = getattr(via, "tenting_attrs", None) or {}
+        keys = {str(k).lower() for k in attrs}
+        filled_capped = "filling" in keys and "capping" in keys
+        if hits and not filled_capped:
+            name = getattr(via, "uuid", "") or f"via@{via.x:.3f},{via.y:.3f}"
+            pads_hit = sorted({_obj_pad(p) for p, _ in hits})
+            f.append(Finding(
+                "via_in_pad_process", "warning",
+                f"Via drill intersects paste-bearing SMD pad area ({', '.join(pads_hit)}). Confirm filled/capped via-in-pad process to avoid solder wicking.",
+                measured=min(gap for _, gap in hits), required=0.0,
+                objects=(name, *pads_hit), location=(via.x, via.y),
+                details={"via_protection_tokens": sorted(keys), "intersection_count": len(hits)},
+            ))
 
     f.sort(key=lambda x: (0 if x.severity == "error" else 1 if x.severity == "warning" else 2, x.rule, x.location or (0,0), x.objects))
     return report
@@ -337,6 +408,10 @@ def check_bom_cpl(bom_path: str, cpl_path: str, report: Optional[DfmReport] = No
     report = report or DfmReport(source=f"{bom_path} + {cpl_path}", profile={"name": "bom-cpl"}, coverage=["BOM/CPL designator consistency"], limitations=[])
     bom_refs, bom_blanks, _ = _read_designators(bom_path)
     cpl_refs, cpl_blanks, _ = _read_designators(cpl_path)
+    report.inputs["bom"] = _file_evidence(bom_path)
+    report.inputs["cpl"] = _file_evidence(cpl_path)
+    report.metrics["bom_designators"] = len(bom_refs)
+    report.metrics["cpl_designators"] = len(cpl_refs)
     for ref in sorted(bom_refs - cpl_refs):
         report.findings.append(Finding("bom_missing_cpl", "error", f"BOM designator {ref} is missing from CPL/position file.", objects=(ref,)))
     for ref in sorted(cpl_refs - bom_refs):
